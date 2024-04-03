@@ -147,71 +147,23 @@ fn main() {
                         uint i;
                     };
 
-                    Pixel hsv_to_rgb(vec3 hsv) {
-                        // https://stackoverflow.com/a/26856771/15474643
-                        // I used the python version of hsv_to_rgb but converted to glsl
+                    vec3 hsv_to_rgb (vec3 c) {
+                        vec4 K = vec4(1.0, 2.0 / 3.0, 1.0 / 3.0, 3.0);
+                        vec3 p = abs(fract(c.xxx + K.xyz) * 6.0 - K.www);
+                        return c.z * mix(K.xxx, clamp(p - K.xxx, 0.0, 1.0), c.y);
+                    }
 
-                        float h = hsv.x;
-                        float s = hsv.y;
-                        float v = hsv.z;
-
-                        uint i = int(h * 6.0);
-                        float f = h * 6.0 - float(i);
-
-                        float w = v * (1.0 - s);
-                        float q = v * (1.0 - s * f);
-                        float t = v * (1.0 - s * (1.0 - f));
-
-                        i = int(mod(i, 6));
-
-                        float r, g, b;
-
-                        if (i == 0) {
-                            r = v;
-                            g = t;
-                            b = w;
-                        } else if (i == 1) {
-                            r = q;
-                            g = v;
-                            b = w;
-                        } else if (i == 2) {
-                            r = w;
-                            g = v;
-                            b = t;
-                        } else if (i == 3) {
-                            r = w;
-                            g = q;
-                            b = v;
-                        } else if (i == 4) {
-                            r = t;
-                            g = w;
-                            b = v;
-                        } else if (i == 5) {
-                            r = v;
-                            g = w;
-                            b = q;
-                        } else { // (i < 6.0)
-                            r = 21.0;
-                            g = 22.0;
-                            b = 23.0;
-                        }
-
-                        Pixel result;
-                        result.r = int(r * 255.0);
-                        result.g = int(g * 255.0);
-                        result.b = int(b * 255.0);
-
-                        return result;
+                    int from_decimal (float n) {
+                        return int(n * 255);
                     }
 
                     void main() {
                         uint idx = gl_GlobalInvocationID.x;
                         if (idx < WIDTH * HEIGHT * DEPTH) {
-                            Pixel res = hsv_to_rgb(vec3(float(idx) / 13, 1.0, 1.0));
-                            data[DEPTH * idx] = res.r;
-                            data[DEPTH * idx + 1] = res.g;
-                            data[DEPTH * idx + 2] = res.b;
-                            data[DEPTH * idx + 3] = res.i;
+                            vec3 res = hsv_to_rgb(vec3(float(idx) / 13, 1.0, 1.0));
+                            data[DEPTH * idx] = from_decimal(res.x);
+                            data[DEPTH * idx + 1] = from_decimal(res.y);
+                            data[DEPTH * idx + 2] = from_decimal(res.z);
                         }
                     }
                 ",
