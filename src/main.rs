@@ -129,15 +129,90 @@ fn main() {
                 src: r"
                     #version 450
 
+                    // Define the dimensions of the image
+                    #define WIDTH 8192
+                    #define HEIGHT 8192
+                    #define DEPTH 3
+
                     layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
-                    layout(set = 0, binding = 0) buffer Data {
-                        uint data[];
+                    layout(std430, set = 0, binding = 0) buffer Data {
+                        uint data[WIDTH * HEIGHT * DEPTH];
                     };
+
+                    struct Pixel {
+                        uint r;
+                        uint g;
+                        uint b;
+                        uint i;
+                    };
+
+                    Pixel hsv_to_rgb(vec3 hsv) {
+                        // https://stackoverflow.com/a/26856771/15474643
+                        // I used the python version of hsv_to_rgb but converted to glsl
+
+                        float h = hsv.x;
+                        float s = hsv.y;
+                        float v = hsv.z;
+
+                        uint i = int(h * 6.0);
+                        float f = h * 6.0 - float(i);
+
+                        float w = v * (1.0 - s);
+                        float q = v * (1.0 - s * f);
+                        float t = v * (1.0 - s * (1.0 - f));
+
+                        i = int(mod(i, 6));
+
+                        float r, g, b;
+
+                        if (i == 0) {
+                            r = v;
+                            g = t;
+                            b = w;
+                        } else if (i == 1) {
+                            r = q;
+                            g = v;
+                            b = w;
+                        } else if (i == 2) {
+                            r = w;
+                            g = v;
+                            b = t;
+                        } else if (i == 3) {
+                            r = w;
+                            g = q;
+                            b = v;
+                        } else if (i == 4) {
+                            r = t;
+                            g = w;
+                            b = v;
+                        } else if (i == 5) {
+                            r = v;
+                            g = w;
+                            b = q;
+                        } else { // (i < 6.0)
+                            r = 21.0;
+                            g = 22.0;
+                            b = 23.0;
+                        }
+
+                        Pixel result;
+                        result.r = int(r * 255.0);
+                        result.g = int(g * 255.0);
+                        result.b = int(b * 255.0);
+
+                        return result;
+                    }
 
                     void main() {
                         uint idx = gl_GlobalInvocationID.x;
-                        data[idx] *= 12;
+                        if (idx < WIDTH * HEIGHT * DEPTH) {
+                            Pixel res = hsv_to_rgb(vec3(float(idx) / 13, 1.0, 1.0));
+                            data[DEPTH * idx] = res.r;
+                            data[DEPTH * idx + 1] = res.g;
+                            data[DEPTH * idx + 2] = res.b;
+                            data[DEPTH * idx + 3] = res.i;
+                        }
                     }
                 ",
             }
@@ -224,9 +299,13 @@ fn main() {
 
     future.wait(None).unwrap();
     let data_buffer_content = data_buffer.read().unwrap();
-    for n in 0..65536u32 {
-        assert_eq!(data_buffer_content[n as usize], n * 12);
+    let mut data: u32;
+    for n in 0..50u32 {
+        data = data_buffer_content[n as usize];
+        println!("{:?}", data);
+        // assert_eq!(data_buffer_content[n as usize], n * 12);
     }
 
     println!("Success!");
 }
+
