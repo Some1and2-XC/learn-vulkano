@@ -1,15 +1,12 @@
 extern crate vulkano;
 extern crate winit;
 
-use std::{fmt::Error, io::Cursor};
-use image::RgbImage;
-use image::Rgb;
+use image::{RgbImage, Rgb};
 
 use vulkano::{
     buffer::{
         Buffer,
         BufferCreateInfo,
-        BufferContents,
         BufferUsage,
     },
     pipeline::{
@@ -20,12 +17,12 @@ use vulkano::{
         PipelineLayout,
         layout::PipelineDescriptorSetLayoutCreateInfo,
         compute::ComputePipelineCreateInfo,
-        graphics::vertex_input::Vertex,
     },
     memory::allocator::{
         StandardMemoryAllocator,
         AllocationCreateInfo,
         MemoryTypeFilter,
+        DeviceLayout,
     },
     descriptor_set::{
         allocator::StandardDescriptorSetAllocator,
@@ -51,6 +48,7 @@ use vulkano::{
         QueueCreateInfo,
         QueueFlags,
     },
+    DeviceSize,
     sync,
     sync::GpuFuture,
     VulkanLibrary,
@@ -63,10 +61,11 @@ const MINIMAL_FEATURES: Features = Features {
     ..Features::empty()
 };
 
-fn main() -> Result<(), Error> {
+fn main() {
 
     let image_width = 1024u32;
     let image_height = 1024u32;
+    let image_bytes: u64 = image_width as u64 * image_height as u64 * 3u64;
 
     // Boilerplate Initialization
     let library = VulkanLibrary::new().unwrap();
@@ -168,12 +167,11 @@ fn main() -> Result<(), Error> {
 
                     void main() {
                         uint idx = gl_GlobalInvocationID.x;
-                        if (idx < WIDTH * HEIGHT * DEPTH) {
-                            vec3 res = hsv_to_rgb(vec3(float(idx) / 13, 1.0, 1.0));
-                            data[DEPTH * idx] = from_decimal(res.x);
-                            data[DEPTH * idx + 1] = from_decimal(res.y);
-                            data[DEPTH * idx + 2] = from_decimal(res.z);
-                        }
+
+                        vec3 res = hsv_to_rgb(vec3(float(idx) / 13, 1.0, 1.0));
+                        data[DEPTH * idx] = from_decimal(res.x);
+                        data[DEPTH * idx + 1] = from_decimal(res.y);
+                        data[DEPTH * idx + 2] = from_decimal(res.z);
                     }
                 ",
             }
@@ -211,7 +209,7 @@ fn main() -> Result<(), Error> {
         Default::default(),
     ));
 
-    let data_buffer = Buffer::from_iter(
+    let data_buffer = Buffer::new_slice::<usize>(
         memory_allocator,
         BufferCreateInfo {
             usage: BufferUsage::STORAGE_BUFFER,
@@ -225,9 +223,8 @@ fn main() -> Result<(), Error> {
                 ,
             ..Default::default()
         },
-        0..(image_width * image_height) as u32,
-    )
-    .unwrap();
+        (image_height * image_height) as DeviceSize,
+    ).unwrap();
 
     let layout = &pipeline.layout().set_layouts()[0];
     let set = PersistentDescriptorSet::new(
@@ -256,7 +253,7 @@ fn main() -> Result<(), Error> {
         )
         .unwrap();
 
-    builder.dispatch([1024, 1, 1]).unwrap();
+    builder.dispatch([16384 * 4, 1, 1]).unwrap();
 
     let command_buffer = builder.build().unwrap();
     let future = sync::now(device)
@@ -268,36 +265,29 @@ fn main() -> Result<(), Error> {
     future.wait(None).unwrap();
     let data_buffer_content = data_buffer.read().unwrap();
 
-    let mut data: Vec<Vec<Vec<u8>>> = data_buffer_content.iter()
-        .map(|v| *v as u8).collect::<Vec<u8>>() // casts to u8
-        .chunks(3)
-        .map(|pixel| Vec::from(pixel)).collect::<Vec<Vec<u8>>>()
-        .chunks(image_width as usize)
-        .map(|row| Vec::from(row)).collect::<Vec<Vec<Vec<u8>>>>()
+    let data: Vec<Vec<Vec<u8>>> = data_buffer_content.iter()
+        .map(|v| *v as u8).collect::<Vec<u8>>() // Casts to Vec<u8>
+        .chunks(3) // Chunks into 3's
+        .map(|pixel| Vec::from(pixel)).collect::<Vec<Vec<u8>>>() // Casts to <Vec<Vec<u8>> Where
+                                                                 // inner has length 3
+        .chunks(image_width as usize) // Chunks again
+        .map(|row| Vec::from(row)).collect::<Vec<Vec<Vec<u8>>>>() // Collects into vec
         ;
-
-    println!("{:?}", data);
 
     let mut img = RgbImage::new(image_width, image_height);
     for (i, row) in data.iter().enumerate() {
         for (j, pixel) in row.iter().enumerate() {
-            if pixel.len() >= 3 {
-                img.put_pixel(i as u32, j as u32, Rgb([pixel[0], pixel[1], pixel[2]]));
+            if pixel.len() >= 3 && j < image_width as usize && i < image_height as usize {
+                img.put_pixel(j as u32, i as u32, Rgb([pixel[0], pixel[1], pixel[2]]));
+            } else {
+                println!("j : {} & i : {} & Pixel : {:?}", j, i, pixel);
             }
         }
     }
 
     img.save("image.png").unwrap();
 
-    for chunk in data_buffer_content.chunks(3) {
-        for elem in chunk.iter() {
-            // data = *chunk as usize;
-            println!("{:?}", *elem as usize);
-            // assert_eq!(data_buffer_content[n as usize], n * 12);
-        }
-    }
+    // println!("{:?}", data);
 
     println!("Success!");
-
-    Ok(())
 }
