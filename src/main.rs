@@ -1,10 +1,15 @@
 extern crate vulkano;
 extern crate winit;
 
+use std::{fmt::Error, io::Cursor};
+use image::RgbImage;
+use image::Rgb;
+
 use vulkano::{
     buffer::{
         Buffer,
         BufferCreateInfo,
+        BufferContents,
         BufferUsage,
     },
     pipeline::{
@@ -15,6 +20,7 @@ use vulkano::{
         PipelineLayout,
         layout::PipelineDescriptorSetLayoutCreateInfo,
         compute::ComputePipelineCreateInfo,
+        graphics::vertex_input::Vertex,
     },
     memory::allocator::{
         StandardMemoryAllocator,
@@ -57,7 +63,10 @@ const MINIMAL_FEATURES: Features = Features {
     ..Features::empty()
 };
 
-fn main() {
+fn main() -> Result<(), Error> {
+
+    let image_width = 1024u32;
+    let image_height = 1024u32;
 
     // Boilerplate Initialization
     let library = VulkanLibrary::new().unwrap();
@@ -104,7 +113,7 @@ fn main() {
     );
 
     if !physical_device.supported_features().contains(&MINIMAL_FEATURES) {
-        panic!("The physical device is not good enough for this application");
+        panic!("Physical device has insufficient features for this application.");
     }
 
     let (device, mut queues) = Device::new(
@@ -190,15 +199,18 @@ fn main() {
         ).unwrap()
     };
 
-    let memory_allocator= Arc::new(StandardMemoryAllocator::new_default(device.clone()));
+    let memory_allocator = Arc::new(StandardMemoryAllocator::new_default(device.clone()));
+
     let descriptor_set_allocator = Arc::new(StandardDescriptorSetAllocator::new(
         device.clone(),
         Default::default(),
     ));
+
     let command_buffer_allocator = Arc::new(StandardCommandBufferAllocator::new(
         device.clone(),
         Default::default(),
     ));
+
     let data_buffer = Buffer::from_iter(
         memory_allocator,
         BufferCreateInfo {
@@ -206,10 +218,14 @@ fn main() {
             ..Default::default()
         },
         AllocationCreateInfo {
-            memory_type_filter: MemoryTypeFilter::PREFER_DEVICE | MemoryTypeFilter::HOST_RANDOM_ACCESS,
+            memory_type_filter:
+                MemoryTypeFilter::PREFER_DEVICE // Tries to use GPU Memory
+                | MemoryTypeFilter::HOST_RANDOM_ACCESS // Then host RAM
+                | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE // Then host Storage (for the big buffers)
+                ,
             ..Default::default()
         },
-        0..65536u32,
+        0..(image_width * image_height) as u32,
     )
     .unwrap();
 
@@ -251,13 +267,37 @@ fn main() {
 
     future.wait(None).unwrap();
     let data_buffer_content = data_buffer.read().unwrap();
-    let mut data: u32;
-    for n in 0..50u32 {
-        data = data_buffer_content[n as usize];
-        println!("{:?}", data);
-        // assert_eq!(data_buffer_content[n as usize], n * 12);
+
+    let mut data: Vec<Vec<Vec<u8>>> = data_buffer_content.iter()
+        .map(|v| *v as u8).collect::<Vec<u8>>() // casts to u8
+        .chunks(3)
+        .map(|pixel| Vec::from(pixel)).collect::<Vec<Vec<u8>>>()
+        .chunks(image_width as usize)
+        .map(|row| Vec::from(row)).collect::<Vec<Vec<Vec<u8>>>>()
+        ;
+
+    println!("{:?}", data);
+
+    let mut img = RgbImage::new(image_width, image_height);
+    for (i, row) in data.iter().enumerate() {
+        for (j, pixel) in row.iter().enumerate() {
+            if pixel.len() >= 3 {
+                img.put_pixel(i as u32, j as u32, Rgb([pixel[0], pixel[1], pixel[2]]));
+            }
+        }
+    }
+
+    img.save("image.png").unwrap();
+
+    for chunk in data_buffer_content.chunks(3) {
+        for elem in chunk.iter() {
+            // data = *chunk as usize;
+            println!("{:?}", *elem as usize);
+            // assert_eq!(data_buffer_content[n as usize], n * 12);
+        }
     }
 
     println!("Success!");
-}
 
+    Ok(())
+}
