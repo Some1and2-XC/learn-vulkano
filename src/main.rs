@@ -2,6 +2,7 @@ extern crate vulkano;
 extern crate winit;
 
 use image::{RgbImage, Rgb};
+use std::{intrinsics::size_of, io};
 
 use vulkano::{
     buffer::{
@@ -63,9 +64,17 @@ const MINIMAL_FEATURES: Features = Features {
 
 fn main() {
 
-    let image_width = 1024u32;
-    let image_height = 1024u32;
-    let image_bytes: u64 = image_width as u64 * image_height as u64 * 3u64;
+    let mut input_string = String::new();
+    io::stdin()
+        .read_line(&mut input_string)
+        .expect("Failed to read");
+
+    // let factor = 8u32;
+    let factor = input_string.trim().parse::<u32>().unwrap();
+
+    let image_width = 2u32.pow(factor);
+    let image_height = 2u32.pow(factor);
+    let image_bytes = image_width * image_height * 3;
 
     // Boilerplate Initialization
     let library = VulkanLibrary::new().unwrap();
@@ -162,13 +171,13 @@ fn main() {
                     }
 
                     int from_decimal (float n) {
-                        return int(n * 255);
+                        return int(mod(n, 1) * 255);
                     }
 
                     void main() {
                         uint idx = gl_GlobalInvocationID.x;
 
-                        vec3 res = hsv_to_rgb(vec3(float(idx) / 13, 1.0, 1.0));
+                        vec3 res = hsv_to_rgb(vec3(float(mod(idx, 360 * 13)) / 13, 1.0, 1.0));
                         data[DEPTH * idx] = from_decimal(res.x);
                         data[DEPTH * idx + 1] = from_decimal(res.y);
                         data[DEPTH * idx + 2] = from_decimal(res.z);
@@ -209,8 +218,18 @@ fn main() {
         Default::default(),
     ));
 
-    let data_buffer = Buffer::new_slice::<usize>(
-        memory_allocator,
+    let min_dynamic_align = device
+        .physical_device()
+        .properties()
+        .min_uniform_buffer_offset_alignment
+        .as_devicesize() as usize;
+    println!("Min uniform buffer offset align: {min_dynamic_align}");
+
+    let align = (size_of::<u8>() + min_dynamic_align - 1) & !(min_dynamic_align - 1);
+    let aligned_data: Vec<u8> = Vec::with_capacity(align);
+
+    let data_buffer = Buffer::from_iter(
+        memory_allocator.clone(),
         BufferCreateInfo {
             usage: BufferUsage::STORAGE_BUFFER,
             ..Default::default()
@@ -223,8 +242,10 @@ fn main() {
                 ,
             ..Default::default()
         },
-        (image_height * image_height) as DeviceSize,
+        aligned_data
     ).unwrap();
+
+    // https://github.com/vulkano-rs/vulkano/blob/master/examples/dynamic-buffers/main.rs
 
     let layout = &pipeline.layout().set_layouts()[0];
     let set = PersistentDescriptorSet::new(
@@ -253,7 +274,7 @@ fn main() {
         )
         .unwrap();
 
-    builder.dispatch([16384 * 4, 1, 1]).unwrap();
+    builder.dispatch([image_width * image_height, 1, 32]).unwrap();
 
     let command_buffer = builder.build().unwrap();
     let future = sync::now(device)
@@ -265,7 +286,9 @@ fn main() {
     future.wait(None).unwrap();
     let data_buffer_content = data_buffer.read().unwrap();
 
-    let data: Vec<Vec<Vec<u8>>> = data_buffer_content.iter()
+    let data: Vec<Vec<Vec<u8>>> = data_buffer_content
+        .iter()
+        .filter(|v| **v <= 256)
         .map(|v| *v as u8).collect::<Vec<u8>>() // Casts to Vec<u8>
         .chunks(3) // Chunks into 3's
         .map(|pixel| Vec::from(pixel)).collect::<Vec<Vec<u8>>>() // Casts to <Vec<Vec<u8>> Where
@@ -288,6 +311,7 @@ fn main() {
     img.save("image.png").unwrap();
 
     // println!("{:?}", data);
+    println!("{:?}", data_buffer_content.iter());
 
     println!("Success!");
 }
