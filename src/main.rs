@@ -2,18 +2,20 @@ extern crate vulkano;
 extern crate winit;
 extern crate image;
 
-use image::{RgbImage, Rgb};
+use image::{
+    ImageBuffer,
+    Rgba,
+};
 use std::{
     io,
     mem::size_of,
     iter::repeat,
+    time::Instant,
 };
 
 use vulkano::{
     buffer::{
-        Buffer,
-        BufferCreateInfo,
-        BufferUsage,
+        allocator::{SubbufferAllocator, SubbufferAllocatorCreateInfo}, Buffer, BufferCreateInfo, BufferUsage, Subbuffer
     }, command_buffer::{
         allocator::StandardCommandBufferAllocator, sys::CommandBufferBeginInfo, AutoCommandBufferBuilder, CommandBufferLevel, CommandBufferUsage, CopyImageToBufferInfo
     }, descriptor_set::{
@@ -69,7 +71,8 @@ fn main() {
 
     let image_width = 2u32.pow(factor);
     let image_height = 2u32.pow(factor);
-    let image_bytes = image_width * image_height * 4;
+
+    let now = Instant::now();
 
     // Boilerplate Initialization
     let library = VulkanLibrary::new().unwrap();
@@ -137,10 +140,10 @@ fn main() {
     mod cs {
         vulkano_shaders::shader! {
             ty: "compute",
-            src: r"
+            src: "
                 #version 460
 
-                layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+                layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
 
                 // layout(std430, set = 0, binding = 0) buffer InData {
                 //     uint index;
@@ -226,20 +229,21 @@ fn main() {
 
     let view = ImageView::new_default(image.clone()).unwrap();
 
-    let data_buffer = Buffer::from_iter(
+    let buffer_allocator = SubbufferAllocator::new(
         memory_allocator.clone(),
-        BufferCreateInfo {
-            usage: BufferUsage::TRANSFER_DST,
-            ..Default::default()
-        },
-        AllocationCreateInfo {
+        SubbufferAllocatorCreateInfo {
+            buffer_usage: BufferUsage::TRANSFER_DST,
             memory_type_filter: MemoryTypeFilter::PREFER_HOST
                 | MemoryTypeFilter::HOST_RANDOM_ACCESS
                 | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
             ..Default::default()
         },
-        (0..(image_width * image_height * 4)).map(|_| 0u8),
-    ).unwrap();
+    );
+
+    let data_buffer: Subbuffer<[u8]> = buffer_allocator
+        .allocate_unsized(size_of::<u8>() as u64 * image_height as u64 * image_width as u64 * 4)
+        .unwrap()
+        ;
 
     // https://github.com/vulkano-rs/vulkano/blob/master/examples/dynamic-buffers/main.rs
 
@@ -281,7 +285,7 @@ fn main() {
         ;
 
     builder
-        .dispatch([image_width / 8, image_height / 8, 1])
+        .dispatch([image_height / 16, image_width / 16, 1])
         .unwrap()
         .copy_image_to_buffer(CopyImageToBufferInfo::image_buffer(
             image.clone(),
@@ -298,42 +302,15 @@ fn main() {
         .unwrap();
     future.wait(None).unwrap();
 
-    let data_buffer_content = data_buffer
-        .read()
-        .unwrap()
-        ;
+    println!("Dispatch Complete");
+    println!("Reading Buffer Content: {:.2?}", now.elapsed());
+    let data_buffer_content = data_buffer.read().unwrap();
+    println!("Buffer Read: {:.2?}", now.elapsed());
 
-    let data: Vec<Vec<Vec<u8>>> = data_buffer_content
-        .iter()
-        .map(|v| *v as u8).collect::<Vec<u8>>()
-        // .filter(|v| **v <= 256)
-        // .map(|v| *v as u8).collect::<Vec<u8>>() // Casts to Vec<u8>
-        .chunks(4) // Chunks into 3's
-        .map(|pixel| Vec::from(pixel)).collect::<Vec<Vec<u8>>>() // Casts to <Vec<Vec<u8>> Where
-                                                                 // inner has length 3
-        .chunks(image_width as usize) // Chunks again
-        .map(|row| Vec::from(row)).collect::<Vec<Vec<Vec<u8>>>>() // Collects into vec
-        ;
-
-    let mut img = RgbImage::new(image_width, image_height);
-    for (i, row) in data.iter().enumerate() {
-        for (j, pixel) in row.iter().enumerate() {
-            if pixel.len() >= 3 && j < image_width as usize && i < image_height as usize {
-                img.put_pixel(j as u32, i as u32, Rgb([pixel[0], pixel[1], pixel[2]]));
-            } else {
-                println!("j : {} & i : {} & Pixel : {:?}", j, i, pixel);
-            }
-        }
-    }
-
+    let img = ImageBuffer::<Rgba<u8>, _>::from_raw(image_width, image_height, &data_buffer_content[..]).unwrap();
+    println!("Saving file...");
     img.save("image.png").unwrap();
+    println!("Image Saved: {:.2?}", now.elapsed());
 
-    // println!("{:?}", data);
-    // println!("{:?}",
-    //      data_buffer_content
-    //          .chunks(4)
-    //          .map(|v| Vec::from(v))
-    //          .collect::<Vec<Vec<f32>>>()
-    //      );
-    println!("Success!");
+    println!("Success!: {:.2?} ({image_width} x {image_height})", now.elapsed());
 }
