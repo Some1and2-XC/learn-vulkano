@@ -1,58 +1,53 @@
 extern crate vulkano;
 extern crate winit;
+extern crate image;
 
 use image::{RgbImage, Rgb};
-use std::{intrinsics::size_of, io};
+use std::{
+    io,
+    mem::size_of,
+    iter::repeat,
+};
 
 use vulkano::{
     buffer::{
         Buffer,
         BufferCreateInfo,
         BufferUsage,
-    },
-    pipeline::{
-        Pipeline,
-        PipelineShaderStageCreateInfo,
-        PipelineBindPoint,
-        ComputePipeline,
-        PipelineLayout,
-        layout::PipelineDescriptorSetLayoutCreateInfo,
-        compute::ComputePipelineCreateInfo,
-    },
-    memory::allocator::{
-        StandardMemoryAllocator,
-        AllocationCreateInfo,
-        MemoryTypeFilter,
-        DeviceLayout,
-    },
-    descriptor_set::{
+    }, command_buffer::{
+        allocator::StandardCommandBufferAllocator, sys::CommandBufferBeginInfo, AutoCommandBufferBuilder, CommandBufferLevel, CommandBufferUsage, CopyImageToBufferInfo
+    }, descriptor_set::{
         allocator::StandardDescriptorSetAllocator,
+        layout::DescriptorType,
         persistent::PersistentDescriptorSet,
+        DescriptorBufferInfo,
+        DescriptorSet,
         WriteDescriptorSet,
-    },
-    command_buffer::{
-        allocator::StandardCommandBufferAllocator,
-        CommandBufferUsage,
-        AutoCommandBufferBuilder,
-    },
-    instance::{
-        Instance,
-        InstanceCreateInfo,
-        InstanceCreateFlags,
-    },
-    device::{
+    }, device::{
+        physical::PhysicalDeviceType,
         Device,
         DeviceCreateInfo,
-        physical::PhysicalDeviceType,
         DeviceExtensions,
         Features,
         QueueCreateInfo,
         QueueFlags,
-    },
-    DeviceSize,
-    sync,
-    sync::GpuFuture,
-    VulkanLibrary,
+    }, format::Format, image::{
+        view::ImageView, Image, ImageCreateInfo, ImageType, ImageUsage
+    }, instance::{
+        Instance,
+        InstanceCreateFlags,
+        InstanceCreateInfo,
+    }, memory::allocator::{
+        AllocationCreateInfo,
+        DeviceLayout,
+        MemoryTypeFilter,
+        StandardMemoryAllocator,
+    }, pipeline::{
+        self, compute::ComputePipelineCreateInfo, layout::PipelineDescriptorSetLayoutCreateInfo, ComputePipeline, Pipeline, PipelineBindPoint, PipelineLayout, PipelineShaderStageCreateInfo
+    }, sync::{
+        self,
+        GpuFuture
+    }, DeviceSize, VulkanLibrary
 };
 
 use std::sync::Arc;
@@ -74,7 +69,7 @@ fn main() {
 
     let image_width = 2u32.pow(factor);
     let image_height = 2u32.pow(factor);
-    let image_bytes = image_width * image_height * 3;
+    let image_bytes = image_width * image_height * 4;
 
     // Boilerplate Initialization
     let library = VulkanLibrary::new().unwrap();
@@ -102,7 +97,7 @@ fn main() {
             p.queue_family_properties()
                 .iter()
                 .position(|q| q.queue_flags.intersects(QueueFlags::COMPUTE))
-                .map(|i| (p, i as u32))
+                .map(|i| (p, i.try_into().unwrap()))
         })
         .min_by_key(|(p, _)| match p.properties().device_type {
             PhysicalDeviceType::DiscreteGpu => 0,
@@ -139,52 +134,49 @@ fn main() {
 
     let queue = queues.next().unwrap();
 
-    let pipeline = {
-        mod cs {
-            vulkano_shaders::shader! {
-                ty: "compute",
-                src: r"
-                    #version 450
+    mod cs {
+        vulkano_shaders::shader! {
+            ty: "compute",
+            src: r"
+                #version 460
 
-                    // Define the dimensions of the image
-                    #define WIDTH 8192
-                    #define HEIGHT 8192
-                    #define DEPTH 3
+                layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
-                    layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+                // layout(std430, set = 0, binding = 0) buffer InData {
+                //     uint index;
+                // } ub;
 
-                    layout(std430, set = 0, binding = 0) buffer Data {
-                        uint data[WIDTH * HEIGHT * DEPTH];
-                    };
+                layout(set = 0, binding = 0, rgba8) uniform writeonly image2D Data;
 
-                    struct Pixel {
-                        uint r;
-                        uint g;
-                        uint b;
-                        uint i;
-                    };
+                vec3 hsv_to_rgb (vec3 c) {
+                    vec4 K = vec4(1.0, 2.0 / 3.0, 1.0 / 3.0, 3.0);
+                    vec3 p = abs(fract(c.xxx + K.xyz) * 6.0 - K.www);
+                    return c.z * mix(K.xxx, clamp(p - K.xxx, 0.0, 1.0), c.y);
+                }
 
-                    vec3 hsv_to_rgb (vec3 c) {
-                        vec4 K = vec4(1.0, 2.0 / 3.0, 1.0 / 3.0, 3.0);
-                        vec3 p = abs(fract(c.xxx + K.xyz) * 6.0 - K.www);
-                        return c.z * mix(K.xxx, clamp(p - K.xxx, 0.0, 1.0), c.y);
-                    }
+                int from_decimal (float n) {
+                    return int(mod(n, 1) * 255);
+                }
 
-                    int from_decimal (float n) {
-                        return int(mod(n, 1) * 255);
-                    }
+                void main() {
+                    vec2 idx = gl_GlobalInvocationID.xy;
 
-                    void main() {
-                        uint idx = gl_GlobalInvocationID.x;
+                    vec3 res = hsv_to_rgb(
+                        vec3(
+                            mod(idx.x / idx.y, 1.0),
+                            1.0,
+                            1.0
+                        )
+                    );
 
-                        vec3 res = hsv_to_rgb(vec3(float(mod(idx, 360 * 13)) / 13, 1.0, 1.0));
-                        data[DEPTH * idx] = from_decimal(res.x);
-                        data[DEPTH * idx + 1] = from_decimal(res.y);
-                        data[DEPTH * idx + 2] = from_decimal(res.z);
-                    }
-                ",
-            }
+                    imageStore(Data, ivec2(idx), vec4(res, 1.0));
+                    // data[idx.x] = res;
+                }
+            ",
         }
+    }
+
+    let pipeline = {
         let cs = cs::load(device.clone())
             .unwrap()
             .entry_point("main")
@@ -196,8 +188,7 @@ fn main() {
             PipelineDescriptorSetLayoutCreateInfo::from_stages([&stage])
                 .into_pipeline_layout_create_info(device.clone())
                 .unwrap(),
-        )
-        .unwrap();
+            ).unwrap();
 
         ComputePipeline::new(
             device.clone(),
@@ -218,31 +209,36 @@ fn main() {
         Default::default(),
     ));
 
-    let min_dynamic_align = device
-        .physical_device()
-        .properties()
-        .min_uniform_buffer_offset_alignment
-        .as_devicesize() as usize;
-    println!("Min uniform buffer offset align: {min_dynamic_align}");
+    let image = Image::new(
+        memory_allocator.clone(),
+        ImageCreateInfo {
+            image_type: ImageType::Dim2d,
+            format: Format::R8G8B8A8_UNORM,
+            extent: [image_width, image_height, 1],
+            usage: ImageUsage::STORAGE | ImageUsage::TRANSFER_SRC,
+            ..Default::default()
+        },
+        AllocationCreateInfo {
+            memory_type_filter: MemoryTypeFilter::PREFER_DEVICE,
+            ..Default::default()
+        },
+    ).unwrap();
 
-    let align = (size_of::<u8>() + min_dynamic_align - 1) & !(min_dynamic_align - 1);
-    let aligned_data: Vec<u8> = Vec::with_capacity(align);
+    let view = ImageView::new_default(image.clone()).unwrap();
 
     let data_buffer = Buffer::from_iter(
         memory_allocator.clone(),
         BufferCreateInfo {
-            usage: BufferUsage::STORAGE_BUFFER,
+            usage: BufferUsage::TRANSFER_DST,
             ..Default::default()
         },
         AllocationCreateInfo {
-            memory_type_filter:
-                MemoryTypeFilter::PREFER_DEVICE // Tries to use GPU Memory
-                | MemoryTypeFilter::HOST_RANDOM_ACCESS // Then host RAM
-                | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE // Then host Storage (for the big buffers)
-                ,
+            memory_type_filter: MemoryTypeFilter::PREFER_HOST
+                | MemoryTypeFilter::HOST_RANDOM_ACCESS
+                | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
             ..Default::default()
         },
-        aligned_data
+        (0..(image_width * image_height * 4)).map(|_| 0u8),
     ).unwrap();
 
     // https://github.com/vulkano-rs/vulkano/blob/master/examples/dynamic-buffers/main.rs
@@ -251,7 +247,16 @@ fn main() {
     let set = PersistentDescriptorSet::new(
         &descriptor_set_allocator,
         layout.clone(),
-        [WriteDescriptorSet::buffer(0, data_buffer.clone())],
+        [
+            WriteDescriptorSet::image_view(0, view.clone()),
+            // WriteDescriptorSet::buffer_with_range(
+            //     0,
+            //     DescriptorBufferInfo {
+            //         buffer: input_data,
+            //         range: 0..size_of::<cs::InData>() as DeviceSize,
+            //     },
+            // ),
+        ],
         [],
     )
     .unwrap();
@@ -272,9 +277,18 @@ fn main() {
             0,
             set,
         )
-        .unwrap();
+        .unwrap()
+        ;
 
-    builder.dispatch([image_width * image_height, 1, 32]).unwrap();
+    builder
+        .dispatch([image_width / 8, image_height / 8, 1])
+        .unwrap()
+        .copy_image_to_buffer(CopyImageToBufferInfo::image_buffer(
+            image.clone(),
+            data_buffer.clone(),
+        ))
+        .unwrap()
+        ;
 
     let command_buffer = builder.build().unwrap();
     let future = sync::now(device)
@@ -282,15 +296,19 @@ fn main() {
         .unwrap()
         .then_signal_fence_and_flush()
         .unwrap();
-
     future.wait(None).unwrap();
-    let data_buffer_content = data_buffer.read().unwrap();
+
+    let data_buffer_content = data_buffer
+        .read()
+        .unwrap()
+        ;
 
     let data: Vec<Vec<Vec<u8>>> = data_buffer_content
         .iter()
-        .filter(|v| **v <= 256)
-        .map(|v| *v as u8).collect::<Vec<u8>>() // Casts to Vec<u8>
-        .chunks(3) // Chunks into 3's
+        .map(|v| *v as u8).collect::<Vec<u8>>()
+        // .filter(|v| **v <= 256)
+        // .map(|v| *v as u8).collect::<Vec<u8>>() // Casts to Vec<u8>
+        .chunks(4) // Chunks into 3's
         .map(|pixel| Vec::from(pixel)).collect::<Vec<Vec<u8>>>() // Casts to <Vec<Vec<u8>> Where
                                                                  // inner has length 3
         .chunks(image_width as usize) // Chunks again
@@ -311,7 +329,11 @@ fn main() {
     img.save("image.png").unwrap();
 
     // println!("{:?}", data);
-    println!("{:?}", data_buffer_content.iter());
-
+    // println!("{:?}",
+    //      data_buffer_content
+    //          .chunks(4)
+    //          .map(|v| Vec::from(v))
+    //          .collect::<Vec<Vec<f32>>>()
+    //      );
     println!("Success!");
 }
