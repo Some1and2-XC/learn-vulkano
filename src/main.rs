@@ -8,6 +8,7 @@ use image::{
     ImageBuffer,
     Rgba,
 };
+use log::{Level, LevelFilter, Metadata, Record};
 use shaderc::CompilationArtifact;
 use core::panic;
 use std::{
@@ -56,6 +57,24 @@ use vulkano::{
 
 use std::sync::Arc;
 
+static LOGGER: Logger = Logger;
+
+struct Logger;
+
+impl log::Log for Logger {
+    fn enabled(&self, metadata: &Metadata) -> bool {
+        metadata.level() <= Level::Info
+    }
+
+    fn log(&self, record: &Record) {
+        if self.enabled(record.metadata()) {
+            println!("{} - {}", record.level(), record.args());
+        }
+    }
+
+    fn flush(&self) {}
+}
+
 const MINIMAL_FEATURES: Features = Features {
     geometry_shader: true,
     ..Features::empty()
@@ -77,6 +96,9 @@ fn compile_to_spirv(src: &str, kind: shaderc::ShaderKind, entry_point_name: &str
 }
 
 fn main() {
+
+    log::set_logger(&LOGGER).unwrap();
+    log::set_max_level(LevelFilter::Info);
 
     let factor = {
 
@@ -136,8 +158,9 @@ fn main() {
         })
         .unwrap();
 
-    println!(
-        "Using Device: {} (Type: {:?})",
+    log::info!(
+        "{:.2?}: Detected Device: {} (Type: {:?})",
+        now.elapsed(),
         physical_device.properties().device_name,
         physical_device.properties().device_type,
     );
@@ -194,6 +217,7 @@ fn main() {
             ComputePipelineCreateInfo::stage_layout(stage, layout),
         ).unwrap()
     };
+    log::info!("{:.2?}: Compiled Shaders", now.elapsed());
 
     let memory_allocator = Arc::new(StandardMemoryAllocator::new_default(device.clone()));
 
@@ -217,7 +241,8 @@ fn main() {
             ..Default::default()
         },
         AllocationCreateInfo {
-            memory_type_filter: MemoryTypeFilter::PREFER_DEVICE,
+            memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                ,
             ..Default::default()
         },
     ).unwrap();
@@ -230,7 +255,8 @@ fn main() {
             buffer_usage: BufferUsage::TRANSFER_DST,
             memory_type_filter: MemoryTypeFilter::PREFER_HOST
                 | MemoryTypeFilter::HOST_RANDOM_ACCESS
-                | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE
+                ,
             ..Default::default()
         },
     );
@@ -292,16 +318,15 @@ fn main() {
         .then_signal_fence_and_flush()
         .unwrap();
     future.wait(None).unwrap();
+    log::info!("{:.2?}: Finished GPU Execution", now.elapsed());
 
-    println!("Dispatch Complete");
-    println!("Reading Buffer Content: {:.2?}", now.elapsed());
     let data_buffer_content = data_buffer.read().unwrap();
-    println!("Buffer Read: {:.2?}", now.elapsed());
+    log::info!("{:.2?}: Read Data Buffer", now.elapsed());
 
     let img = ImageBuffer::<Rgba<u8>, _>::from_raw(image_width, image_height, &data_buffer_content[..]).unwrap();
-    println!("Saving file...");
+    log::info!("{:.2?}: Saving file...", now.elapsed());
     img.save("image.png").unwrap();
-    println!("Image Saved: {:.2?}", now.elapsed());
+    log::info!("{:.2?}: Image Saved", now.elapsed());
 
-    println!("Success!: {:.2?} ({image_width} x {image_height})", now.elapsed());
+    log::info!("{:.2?}: Success! ({image_width}px x {image_height}px)", now.elapsed());
 }
