@@ -1,29 +1,27 @@
 extern crate vulkano;
 extern crate winit;
 extern crate image;
+extern crate log;
 
 use image::{
     ImageBuffer,
     Rgba,
 };
+use core::panic;
 use std::{
-    io,
     mem::size_of,
-    iter::repeat,
     time::Instant,
+    env,
 };
 
 use vulkano::{
     buffer::{
-        allocator::{SubbufferAllocator, SubbufferAllocatorCreateInfo}, Buffer, BufferCreateInfo, BufferUsage, Subbuffer
+        allocator::{SubbufferAllocator, SubbufferAllocatorCreateInfo}, BufferUsage, Subbuffer
     }, command_buffer::{
-        allocator::StandardCommandBufferAllocator, sys::CommandBufferBeginInfo, AutoCommandBufferBuilder, CommandBufferLevel, CommandBufferUsage, CopyImageToBufferInfo
+        allocator::StandardCommandBufferAllocator, AutoCommandBufferBuilder, CommandBufferUsage, CopyImageToBufferInfo
     }, descriptor_set::{
         allocator::StandardDescriptorSetAllocator,
-        layout::DescriptorType,
         persistent::PersistentDescriptorSet,
-        DescriptorBufferInfo,
-        DescriptorSet,
         WriteDescriptorSet,
     }, device::{
         physical::PhysicalDeviceType,
@@ -41,15 +39,14 @@ use vulkano::{
         InstanceCreateInfo,
     }, memory::allocator::{
         AllocationCreateInfo,
-        DeviceLayout,
         MemoryTypeFilter,
         StandardMemoryAllocator,
     }, pipeline::{
-        self, compute::ComputePipelineCreateInfo, layout::PipelineDescriptorSetLayoutCreateInfo, ComputePipeline, Pipeline, PipelineBindPoint, PipelineLayout, PipelineShaderStageCreateInfo
+        compute::ComputePipelineCreateInfo, layout::PipelineDescriptorSetLayoutCreateInfo, ComputePipeline, Pipeline, PipelineBindPoint, PipelineLayout, PipelineShaderStageCreateInfo
     }, sync::{
         self,
         GpuFuture
-    }, DeviceSize, VulkanLibrary
+    }, VulkanLibrary
 };
 
 use std::sync::Arc;
@@ -61,13 +58,20 @@ const MINIMAL_FEATURES: Features = Features {
 
 fn main() {
 
-    let mut input_string = String::new();
-    io::stdin()
-        .read_line(&mut input_string)
-        .expect("Failed to read");
+    let factor = {
 
-    // let factor = 8u32;
-    let factor = input_string.trim().parse::<u32>().unwrap();
+        let arg: String = match env::args().nth(1) {
+            Some(v) => v,
+            None => "".into(),
+        };
+
+        match arg.parse::<u32>() {
+            Ok(value) => value,
+            Err(_) => {
+                panic!("Failed to parse number from cli arg: '{arg}'!");
+            }
+        }
+    };
 
     let image_width = 2u32.pow(factor);
     let image_height = 2u32.pow(factor);
@@ -161,19 +165,43 @@ fn main() {
                     return int(mod(n, 1) * 255);
                 }
 
+                void write_data(vec3 res) {
+                    imageStore(Data, ivec2(gl_GlobalInvocationID.xy), vec4(res, 1.0));
+                }
+
                 void main() {
-                    vec2 idx = gl_GlobalInvocationID.xy;
+                    // vec2 idx = gl_GlobalInvocationID.xy;
+                    vec2 cords = (gl_GlobalInvocationID.xy + vec2(0.5)) / vec2(imageSize(Data));
+                    vec2 c = (cords - vec2(0.5)) * 4.0;
+                    vec2 z = vec2(0.0, 0.0);
+                    float i;
+                    float maxi = 1000.0;
+                    float added = 1.0 / maxi;
 
-                    vec3 res = hsv_to_rgb(
-                        vec3(
-                            mod(idx.x / idx.y, 1.0),
-                            1.0,
-                            1.0
-                        )
-                    );
+                    vec3 res;
 
-                    imageStore(Data, ivec2(idx), vec4(res, 1.0));
-                    // data[idx.x] = res;
+                    if (length(c) > 4.0) {
+                        write_data(vec3(1.0, 1.0, 1.0));
+                        return;
+                    }
+
+                    for (i = 0.0; i < 1.0; i += added) {
+                        z = vec2(
+                            z.x * z.x - z.y * z.y + c.x,
+                            z.y * z.x + z.x * z.y + c.y
+                        );
+
+                        if (length(z) > 4.0) {
+                            write_data(hsv_to_rgb(vec3(
+                                mod(i * maxi * 9.0 / 360.0, 1.0),
+                                1.0,
+                                1.0
+                            )));
+                            return;
+                        }
+                    }
+
+                    write_data(vec3(0.0, 0.0, 0.0));
                 }
             ",
         }
@@ -240,12 +268,16 @@ fn main() {
         },
     );
 
-    let data_buffer: Subbuffer<[u8]> = buffer_allocator
-        .allocate_unsized(size_of::<u8>() as u64 * image_height as u64 * image_width as u64 * 4)
-        .unwrap()
-        ;
+    let buf_length = image_height as u64 * image_width as u64 * 4;
 
-    // https://github.com/vulkano-rs/vulkano/blob/master/examples/dynamic-buffers/main.rs
+    let data_buffer: Subbuffer<[u8]> = match buffer_allocator
+        .allocate_unsized(buf_length) {
+            Ok(v) => v,
+            Err(_) => {
+                panic!("Unable to allocate '{buf_length}'!");
+            },
+    }
+    ;
 
     let layout = &pipeline.layout().set_layouts()[0];
     let set = PersistentDescriptorSet::new(
@@ -253,13 +285,6 @@ fn main() {
         layout.clone(),
         [
             WriteDescriptorSet::image_view(0, view.clone()),
-            // WriteDescriptorSet::buffer_with_range(
-            //     0,
-            //     DescriptorBufferInfo {
-            //         buffer: input_data,
-            //         range: 0..size_of::<cs::InData>() as DeviceSize,
-            //     },
-            // ),
         ],
         [],
     )
