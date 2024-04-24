@@ -2,15 +2,18 @@ extern crate vulkano;
 extern crate winit;
 extern crate image;
 extern crate log;
+extern crate shaderc;
 
 use image::{
     ImageBuffer,
     Rgba,
 };
+use shaderc::CompilationArtifact;
 use core::panic;
 use std::{
-    mem::size_of,
+    fs::File,
     time::Instant,
+    io::Read,
     env,
 };
 
@@ -43,6 +46,8 @@ use vulkano::{
         StandardMemoryAllocator,
     }, pipeline::{
         compute::ComputePipelineCreateInfo, layout::PipelineDescriptorSetLayoutCreateInfo, ComputePipeline, Pipeline, PipelineBindPoint, PipelineLayout, PipelineShaderStageCreateInfo
+    }, shader::{
+        ShaderModule, ShaderModuleCreateInfo,
     }, sync::{
         self,
         GpuFuture
@@ -55,6 +60,21 @@ const MINIMAL_FEATURES: Features = Features {
     geometry_shader: true,
     ..Features::empty()
 };
+
+fn compile_to_spirv(src: &str, kind: shaderc::ShaderKind, entry_point_name: &str) -> CompilationArtifact {
+    let mut f = File::open(src).unwrap_or_else(|_| panic!("Could not open file {src}"));
+    let mut glsl = String::new();
+    f.read_to_string(&mut glsl)
+        .unwrap_or_else(|_| panic!("Could not read file {src} to string"));
+
+    let compiler = shaderc::Compiler::new().unwrap();
+    let mut options = shaderc::CompileOptions::new().unwrap();
+
+    options.add_macro_definition("EP", Some(entry_point_name));
+    compiler
+        .compile_into_spirv(&glsl, kind, src, entry_point_name, Some(&options))
+        .expect("Could not compile GLSL shader to spir-v")
+}
 
 fn main() {
 
@@ -141,79 +161,26 @@ fn main() {
 
     let queue = queues.next().unwrap();
 
-    mod cs {
-        vulkano_shaders::shader! {
-            ty: "compute",
-            src: "
-                #version 460
-
-                layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
-
-                // layout(std430, set = 0, binding = 0) buffer InData {
-                //     uint index;
-                // } ub;
-
-                layout(set = 0, binding = 0, rgba8) uniform writeonly image2D Data;
-
-                vec3 hsv_to_rgb (vec3 c) {
-                    vec4 K = vec4(1.0, 2.0 / 3.0, 1.0 / 3.0, 3.0);
-                    vec3 p = abs(fract(c.xxx + K.xyz) * 6.0 - K.www);
-                    return c.z * mix(K.xxx, clamp(p - K.xxx, 0.0, 1.0), c.y);
-                }
-
-                int from_decimal (float n) {
-                    return int(mod(n, 1) * 255);
-                }
-
-                void write_data(vec3 res) {
-                    imageStore(Data, ivec2(gl_GlobalInvocationID.xy), vec4(res, 1.0));
-                }
-
-                void main() {
-                    // vec2 idx = gl_GlobalInvocationID.xy;
-                    vec2 cords = (gl_GlobalInvocationID.xy + vec2(0.5)) / vec2(imageSize(Data));
-                    vec2 c = (cords - vec2(0.5)) * 4.0;
-                    vec2 z = vec2(0.0, 0.0);
-                    float i;
-                    float maxi = 1000.0;
-                    float added = 1.0 / maxi;
-
-                    vec3 res;
-
-                    if (length(c) > 4.0) {
-                        write_data(vec3(1.0, 1.0, 1.0));
-                        return;
-                    }
-
-                    for (i = 0.0; i < 1.0; i += added) {
-                        z = vec2(
-                            z.x * z.x - z.y * z.y + c.x,
-                            z.y * z.x + z.x * z.y + c.y
-                        );
-
-                        if (length(z) > 4.0) {
-                            write_data(hsv_to_rgb(vec3(
-                                mod(i * maxi * 9.0 / 360.0, 1.0),
-                                1.0,
-                                1.0
-                            )));
-                            return;
-                        }
-                    }
-
-                    write_data(vec3(0.0, 0.0, 0.0));
-                }
-            ",
-        }
-    }
-
     let pipeline = {
-        let cs = cs::load(device.clone())
-            .unwrap()
-            .entry_point("main")
-            .unwrap();
+        let entry_point = "main";
+        let cs = {
+            unsafe {
+                ShaderModule::new(
+                    device.clone(),
+                    ShaderModuleCreateInfo::new(
+                        compile_to_spirv(
+                            "comp.glsl",
+                            shaderc::ShaderKind::Compute,
+                            entry_point)
+                            .as_binary(),
+                    ),
+                ).unwrap()
+            }
+        };
 
-        let stage = PipelineShaderStageCreateInfo::new(cs);
+        let stage = PipelineShaderStageCreateInfo::new(
+            cs.entry_point(entry_point).unwrap()
+            );
         let layout = PipelineLayout::new(
             device.clone(),
             PipelineDescriptorSetLayoutCreateInfo::from_stages([&stage])
@@ -276,8 +243,7 @@ fn main() {
             Err(_) => {
                 panic!("Unable to allocate '{buf_length}'!");
             },
-    }
-    ;
+    };
 
     let layout = &pipeline.layout().set_layouts()[0];
     let set = PersistentDescriptorSet::new(
